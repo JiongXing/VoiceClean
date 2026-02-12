@@ -166,37 +166,44 @@ final class AudioViewModel {
 
         audioFiles[index].status = .processing(0)
 
+        let url = audioFiles[index].url
+        let fileName = audioFiles[index].fileName
+        let strength = Float(denoiseStrength)
+        let fileIndex = index
+
         do {
-            // 加载并重采样音频
-            let audioData = try AudioFileService.loadAndResample(url: audioFiles[index].url)
+            // 所有重操作通过 GCD 在全局队列执行，确保不在主线程
+            let result: (waveform: [Float], tempURL: URL) = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        // 加载并重采样音频
+                        let audioData = try AudioFileService.loadAndResample(url: url)
 
-            // 在后台线程执行降噪
-            let strength = Float(denoiseStrength)
-            let fileIndex = index
+                        // 初始化降噪引擎 + 执行降噪
+                        let denoiser = try AudioDenoiser(strength: strength)
+                        let processedData = try denoiser.process(audioData: audioData) { progress in
+                            DispatchQueue.main.async {
+                                self.audioFiles[fileIndex].status = .processing(progress)
+                            }
+                        }
 
-            let processedData = try await Task.detached(priority: .userInitiated) {
-                let denoiser = try AudioDenoiser(strength: strength)
-                return try denoiser.process(audioData: audioData) { [weak self] progress in
-                    Task { @MainActor [weak self] in
-                        guard let self, fileIndex < self.audioFiles.count else { return }
-                        self.audioFiles[fileIndex].status = .processing(progress)
+                        // 提取波形 + 保存临时文件
+                        let waveform = AudioFileService.extractWaveformSamples(from: processedData)
+                        let tempURL = try AudioFileService.saveToTempFile(
+                            data: processedData,
+                            originalFileName: fileName
+                        )
+
+                        continuation.resume(returning: (waveform, tempURL))
+                    } catch {
+                        continuation.resume(throwing: error)
                     }
                 }
-            }.value
+            }
 
             guard index < audioFiles.count else { return }
-
-            // 提取处理后的波形
-            let processedWaveform = AudioFileService.extractWaveformSamples(from: processedData)
-            audioFiles[index].processedWaveformSamples = processedWaveform
-
-            // 保存到临时文件
-            let tempURL = try AudioFileService.saveToTempFile(
-                data: processedData,
-                originalFileName: audioFiles[index].fileName
-            )
-
-            audioFiles[index].status = .completed(tempURL)
+            audioFiles[index].processedWaveformSamples = result.waveform
+            audioFiles[index].status = .completed(result.tempURL)
 
         } catch {
             guard index < audioFiles.count else { return }
