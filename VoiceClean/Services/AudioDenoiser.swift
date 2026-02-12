@@ -44,12 +44,10 @@ final class AudioDenoiser: Sendable {
 
     // MARK: - Core ML 输出 key 名称
 
-    /// CoreML 自动生成的输出 key 名称（按顺序: Identity, Identity_1, ...）
-    /// Model 1 输出: [mask, state_h_0, state_c_0, state_h_1, state_c_1]
-    /// Model 2 输出: [decoded_frame, state_h_0, state_c_0, state_h_1, state_c_1]
-    private let outputKeys: [String] = [
-        "Identity", "Identity_1", "Identity_2", "Identity_3", "Identity_4",
-    ]
+    /// Model 1 输出 key（通过 shape 识别 + 扰动测试确定的映射）
+    private let m1MaskKey = "mask_output"
+    /// Model 2 输出 key
+    private let m2FrameKey = "frame_output"
 
     // MARK: - 初始化
 
@@ -61,20 +59,24 @@ final class AudioDenoiser: Sendable {
         let config = MLModelConfiguration()
         config.computeUnits = .all
 
-        guard let model1URL = Bundle.main.url(forResource: "DTLN_model_1", withExtension: "mlmodelc")
-            ?? Bundle.main.url(forResource: "DTLN_model_1", withExtension: "mlpackage")
-        else {
-            throw DenoiserError.modelNotFound("DTLN_model_1")
+        self.model1 = try Self.loadModel(named: "DTLN_model_1", configuration: config)
+        self.model2 = try Self.loadModel(named: "DTLN_model_2", configuration: config)
+    }
+
+    /// 加载 Core ML 模型，优先使用 Xcode 预编译的 .mlmodelc，否则从 .mlpackage 运行时编译
+    private static func loadModel(named name: String, configuration: MLModelConfiguration) throws -> MLModel {
+        // Xcode 将 .mlpackage 自动编译为 .mlmodelc 放入 Bundle，直接加载即可
+        if let compiledURL = Bundle.main.url(forResource: name, withExtension: "mlmodelc") {
+            return try MLModel(contentsOf: compiledURL, configuration: configuration)
         }
 
-        guard let model2URL = Bundle.main.url(forResource: "DTLN_model_2", withExtension: "mlmodelc")
-            ?? Bundle.main.url(forResource: "DTLN_model_2", withExtension: "mlpackage")
-        else {
-            throw DenoiserError.modelNotFound("DTLN_model_2")
+        // 回退：从 .mlpackage 运行时编译（开发调试场景）
+        if let packageURL = Bundle.main.url(forResource: name, withExtension: "mlpackage") {
+            let compiledURL = try MLModel.compileModel(at: packageURL)
+            return try MLModel(contentsOf: compiledURL, configuration: configuration)
         }
 
-        self.model1 = try MLModel(contentsOf: MLModel.compileModel(at: model1URL), configuration: config)
-        self.model2 = try MLModel(contentsOf: MLModel.compileModel(at: model2URL), configuration: config)
+        throw DenoiserError.modelNotFound(name)
     }
 
     // MARK: - 主处理方法
@@ -143,15 +145,18 @@ final class AudioDenoiser: Sendable {
             let m1Provider = try MLDictionaryFeatureProvider(dictionary: model1Dict)
             let m1Output = try model1.prediction(from: m1Provider)
 
-            // 提取掩码 (第一个输出)
-            guard let maskArray = m1Output.featureValue(for: outputKeys[0])?.multiArrayValue else {
+            // 提取掩码
+            guard let maskArray = m1Output.featureValue(for: m1MaskKey)?.multiArrayValue else {
                 throw DenoiserError.modelOutputMissing("mask from Model 1")
             }
 
-            // 更新 Model 1 的 LSTM 状态 (输出 1~4)
-            for i in 0..<(numLayers * 2) {
-                if let stateOut = m1Output.featureValue(for: outputKeys[i + 1])?.multiArrayValue {
-                    m1States[i] = stateOut
+            // 更新 Model 1 的 LSTM 状态
+            for i in 0..<numLayers {
+                if let h = m1Output.featureValue(for: "m1_out_h_\(i)")?.multiArrayValue {
+                    m1States[i * 2] = h
+                }
+                if let c = m1Output.featureValue(for: "m1_out_c_\(i)")?.multiArrayValue {
+                    m1States[i * 2 + 1] = c
                 }
             }
 
@@ -178,15 +183,18 @@ final class AudioDenoiser: Sendable {
             let m2Provider = try MLDictionaryFeatureProvider(dictionary: model2Dict)
             let m2Output = try model2.prediction(from: m2Provider)
 
-            // 提取增强帧 (第一个输出 — Model 2 直接输出增强后的时域帧)
-            guard let enhancedArray = m2Output.featureValue(for: outputKeys[0])?.multiArrayValue else {
+            // 提取增强帧 (Model 2 直接输出增强后的时域帧)
+            guard let enhancedArray = m2Output.featureValue(for: m2FrameKey)?.multiArrayValue else {
                 throw DenoiserError.modelOutputMissing("enhanced frame from Model 2")
             }
 
             // 更新 Model 2 的 LSTM 状态
-            for i in 0..<(numLayers * 2) {
-                if let stateOut = m2Output.featureValue(for: outputKeys[i + 1])?.multiArrayValue {
-                    m2States[i] = stateOut
+            for i in 0..<numLayers {
+                if let h = m2Output.featureValue(for: "m2_out_h_\(i)")?.multiArrayValue {
+                    m2States[i * 2] = h
+                }
+                if let c = m2Output.featureValue(for: "m2_out_c_\(i)")?.multiArrayValue {
+                    m2States[i * 2 + 1] = c
                 }
             }
 

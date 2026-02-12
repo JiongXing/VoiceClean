@@ -175,6 +175,10 @@ def build_and_load_models():
             NUM_UNITS, return_sequences=True, return_state=True,
             unroll=True, name=f"m1_lstm_{i}"
         )(m1_x, initial_state=[h_in, c_in])
+        # 用命名的 Activation('linear') 包裹状态输出，
+        # 防止 coremltools 将 h_out 与 LSTM 序列输出合并优化掉
+        h_out = Activation('linear', name=f"m1_out_h_{i}")(h_out)
+        c_out = Activation('linear', name=f"m1_out_c_{i}")(c_out)
         m1_state_outputs.extend([h_out, c_out])
 
     m1_mask = Dense(BLOCK_LEN // 2 + 1, name="m1_dense")(m1_x)
@@ -213,6 +217,10 @@ def build_and_load_models():
             NUM_UNITS, return_sequences=True, return_state=True,
             unroll=True, name=f"m2_lstm_{i}"
         )(m2_x, initial_state=[h_in, c_in])
+        # 用命名的 Activation('linear') 包裹状态输出，
+        # 防止 coremltools 将 h_out 与 LSTM 序列输出合并优化掉
+        h_out = Activation('linear', name=f"m2_out_h_{i}")(h_out)
+        c_out = Activation('linear', name=f"m2_out_c_{i}")(c_out)
         m2_state_outputs.extend([h_out, c_out])
 
     m2_mask = Dense(ENCODER_SIZE, name="m2_dense")(m2_x)
@@ -244,6 +252,79 @@ def build_and_load_models():
     return model_1, model_2
 
 
+def rename_model_outputs(mlmodel, state_prefix, main_output_name,
+                         main_shape_last_dim, num_layer, num_units):
+    """
+    通过 shape 识别主输出(mask/frame)，通过扰动测试确定状态输出映射，然后重命名。
+    """
+    import coremltools as ct
+
+    spec = mlmodel.get_spec()
+    output_names = [o.name for o in spec.description.output]
+    print(f"  原始输出名: {output_names}")
+
+    # ── Step 1: 准备零输入 ──
+    feed = {}
+    for inp in spec.description.input:
+        raw_shape = inp.type.multiArrayType.shape
+        shape = tuple(int(d) for d in raw_shape)
+        feed[inp.name] = np.zeros(shape, dtype=np.float32)
+
+    baseline = mlmodel.predict(feed)
+
+    # ── Step 2: 通过 shape 识别主输出 (mask / frame) ──
+    main_key = None
+    state_output_keys = []
+    for k, v in baseline.items():
+        if len(v.shape) == 3 and v.shape[-1] == main_shape_last_dim:
+            main_key = k
+        else:
+            state_output_keys.append(k)
+
+    assert main_key is not None, f"找不到主输出 (shape 末维={main_shape_last_dim})"
+    print(f"  主输出: {main_key} -> {main_output_name}")
+
+    # ── Step 3: 通过扰动测试确定状态映射 ──
+    state_input_names = []
+    for i in range(num_layer):
+        state_input_names.append(f"{state_prefix}_state_h_{i}")
+        state_input_names.append(f"{state_prefix}_state_c_{i}")
+
+    # 对每个状态输入进行扰动，找出受影响最大的输出
+    output_to_desired = {}
+    claimed_outputs = set()
+
+    for state_input in state_input_names:
+        perturbed = dict(feed)
+        perturbed[state_input] = np.full((1, num_units), 5.0, dtype=np.float32)
+        result = mlmodel.predict(perturbed)
+
+        # 计算每个状态输出与 baseline 的差异
+        diffs = {}
+        for out_key in state_output_keys:
+            if out_key in claimed_outputs:
+                continue
+            diff = np.abs(result[out_key] - baseline[out_key]).sum()
+            diffs[out_key] = diff
+
+        if diffs:
+            best_match = max(diffs, key=diffs.get)
+            desired_name = state_input.replace("_state_", "_out_")
+            output_to_desired[best_match] = desired_name
+            claimed_outputs.add(best_match)
+            print(f"  {best_match} -> {desired_name} (diff={diffs[best_match]:.4f})")
+
+    # ── Step 4: 执行重命名 ──
+    ct.utils.rename_feature(spec, main_key, main_output_name)
+    for old_name, new_name in output_to_desired.items():
+        ct.utils.rename_feature(spec, old_name, new_name)
+
+    renamed = ct.models.MLModel(spec, weights_dir=mlmodel.weights_dir)
+    final_names = [o.name for o in renamed.get_spec().description.output]
+    print(f"  重命名后: {final_names}")
+    return renamed
+
+
 def convert_to_coreml(model_1, model_2):
     """将两个子模型转换为 Core ML 格式"""
     import coremltools as ct
@@ -261,6 +342,7 @@ def convert_to_coreml(model_1, model_2):
     try:
         mlmodel_1 = ct.convert(
             model_1,
+            source="tensorflow",
             convert_to="mlprogram",
             inputs=m1_inputs,
             minimum_deployment_target=ct.target.macOS13,
@@ -268,6 +350,14 @@ def convert_to_coreml(model_1, model_2):
     except Exception as e:
         print(f"[ERROR] Model 1 转换失败: {e}")
         raise
+
+    print("[INFO] 重命名 Model 1 输出...")
+    mlmodel_1 = rename_model_outputs(
+        mlmodel_1, state_prefix="m1",
+        main_output_name="mask_output",
+        main_shape_last_dim=BLOCK_LEN // 2 + 1,
+        num_layer=NUM_LAYER, num_units=NUM_UNITS
+    )
 
     mlmodel_1.author = "VoiceClean"
     mlmodel_1.short_description = "DTLN 分离网络 - 频谱掩码估计"
@@ -292,6 +382,7 @@ def convert_to_coreml(model_1, model_2):
     try:
         mlmodel_2 = ct.convert(
             model_2,
+            source="tensorflow",
             convert_to="mlprogram",
             inputs=m2_inputs,
             minimum_deployment_target=ct.target.macOS13,
@@ -299,6 +390,14 @@ def convert_to_coreml(model_1, model_2):
     except Exception as e:
         print(f"[ERROR] Model 2 转换失败: {e}")
         raise
+
+    print("[INFO] 重命名 Model 2 输出...")
+    mlmodel_2 = rename_model_outputs(
+        mlmodel_2, state_prefix="m2",
+        main_output_name="frame_output",
+        main_shape_last_dim=BLOCK_LEN,
+        num_layer=NUM_LAYER, num_units=NUM_UNITS
+    )
 
     mlmodel_2.author = "VoiceClean"
     mlmodel_2.short_description = "DTLN 增强网络 - 特征域信号增强"
@@ -330,6 +429,8 @@ def verify_models(path_1, path_2):
 
     out1 = m1.predict(m1_feed)
     print(f"[OK] Model 1 推理成功，输出 keys: {sorted(out1.keys())}")
+    for k, v in sorted(out1.items()):
+        print(f"     {k}: shape={v.shape}")
 
     # 测试 Model 2
     m2_feed = {"frame_input": np.random.randn(1, 1, BLOCK_LEN).astype(np.float32)}
@@ -339,6 +440,8 @@ def verify_models(path_1, path_2):
 
     out2 = m2.predict(m2_feed)
     print(f"[OK] Model 2 推理成功，输出 keys: {sorted(out2.keys())}")
+    for k, v in sorted(out2.items()):
+        print(f"     {k}: shape={v.shape}")
 
     print("\n✅ 模型转换和验证全部完成！")
     print(f"   {path_1}")
