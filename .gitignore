@@ -1,0 +1,85 @@
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ===== Xcode =====
+## Build generated
+build/
+DerivedData/
+
+## User-specific Xcode settings
+*.xcuserstate
+xcuserdata/
+
+## Xcode automatically generated files
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+## Xcode workspaces (not shared data)
+*.xcworkspace/xcuserdata/
+
+## Swift Package Manager (Xcode integrated)
+.build/
+.swiftpm/
+
+# ===== Swift =====
+## Playground
+timeline.xctimeline
+playground.xcworkspace
+
+# ===== Python (scripts/) =====
+## Virtual environments
+scripts/venv/
+scripts/.venv/
+scripts/env/
+
+## Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+## Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+
+## Jupyter Notebook
+.ipynb_checkpoints/
+
+# ===== CoreML / ML Model artifacts =====
+## Intermediate ONNX models (can be regenerated)
+scripts/*.onnx
+scripts/DTLN/*.onnx
+
+## TFLite intermediate files (already in pretrained_model, keep those)
+# scripts/*.tflite
+
+# ===== IDE / Editor =====
+## Cursor / VS Code
+.cursor/
+
+## JetBrains
+.idea/
+
+## Vim
+*.swp
+*.swo
+*~
+
+# ===== Misc =====
+## Archives & compressed files (avoid accidental commits)
+*.zip
+*.tar.gz
+
+## Audio test files (potentially large)
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
