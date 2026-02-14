@@ -24,6 +24,10 @@ struct WaveformView: View {
     /// 是否镜像显示（上下对称）
     var mirrored: Bool = true
 
+    /// 参考最大振幅（用于对比模式下统一归一化基准）
+    /// 如果为 nil，则使用自身数据的最大值进行归一化
+    var referenceMaxAmplitude: Float? = nil
+
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -44,11 +48,12 @@ struct WaveformView: View {
                     guard barCount > 0 else { return }
 
                     let barWidth = max(1, size.width / CGFloat(barCount))
-                    let maxAmplitude = samples.max() ?? 1.0
+                    // 使用参考最大振幅（对比模式）或自身最大振幅（独立模式）
+                    let maxAmplitude = referenceMaxAmplitude ?? (samples.max() ?? 1.0)
                     let normalizer: Float = maxAmplitude > 0 ? maxAmplitude : 1.0
 
                     for i in 0..<barCount {
-                        let normalized = CGFloat(samples[i] / normalizer)
+                        let normalized = min(1.0, CGFloat(samples[i] / normalizer))
                         let barHeight = max(1, normalized * (size.height / 2 - 2))
                         let x = CGFloat(i) * barWidth
 
@@ -90,6 +95,16 @@ struct WaveformComparisonView: View {
     let originalSamples: [Float]
     let processedSamples: [Float]
 
+    /// 使用原始波形的最大振幅作为统一基准，确保对比时比例一致
+    private var referenceMax: Float {
+        originalSamples.max() ?? 1.0
+    }
+
+    /// 是否已有降噪结果
+    private var hasProcessedData: Bool {
+        !processedSamples.isEmpty
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             // 原始波形
@@ -98,22 +113,30 @@ struct WaveformComparisonView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                WaveformView(samples: originalSamples, color: .secondary)
-                    .frame(height: 50)
+                WaveformView(
+                    samples: originalSamples,
+                    color: .secondary,
+                    referenceMaxAmplitude: referenceMax
+                )
+                .frame(height: 50)
             }
 
             // 处理后波形
             VStack(alignment: .leading, spacing: 4) {
-                Label("降噪后", systemImage: "waveform.path.ecg")
-                    .font(.caption)
-                    .foregroundStyle(Color.accentColor)
+                Label(
+                    hasProcessedData ? "降噪后" : "降噪后（待处理）",
+                    systemImage: "waveform.path.ecg"
+                )
+                .font(.caption)
+                .foregroundStyle(hasProcessedData ? Color.accentColor : .secondary)
 
+                // 降噪前显示空状态（水平线），降噪后显示实际波形并使用统一基准
                 WaveformView(
-                    samples: processedSamples.isEmpty ? originalSamples : processedSamples,
-                    color: .accentColor
+                    samples: processedSamples,
+                    color: .accentColor,
+                    referenceMaxAmplitude: referenceMax
                 )
                 .frame(height: 50)
-                .opacity(processedSamples.isEmpty ? 0.3 : 1.0)
             }
         }
     }
