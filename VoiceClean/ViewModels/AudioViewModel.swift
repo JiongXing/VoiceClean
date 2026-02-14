@@ -160,41 +160,44 @@ final class AudioViewModel {
 
     // MARK: - 私有方法
 
-    /// 处理指定索引的文件
+    /// 处理指定索引的文件（使用 FFmpeg arnndn 降噪）
     private func processFile(at index: Int) async {
         guard index < audioFiles.count else { return }
 
         audioFiles[index].status = .processing(0)
 
-        let url = audioFiles[index].url
+        let inputURL = audioFiles[index].url
         let fileName = audioFiles[index].fileName
+        let duration = audioFiles[index].duration
         let strength = Float(denoiseStrength)
         let fileIndex = index
 
         do {
+            // 生成输出临时文件 URL
+            let outputURL = AudioFileService.generateTempOutputURL(originalFileName: fileName)
+
             // 所有重操作通过 GCD 在全局队列执行，确保不在主线程
             let result: (waveform: [Float], tempURL: URL) = try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
-                        // 加载并重采样音频
-                        let audioData = try AudioFileService.loadAndResample(url: url)
+                        // 初始化 FFmpeg 降噪引擎
+                        let denoiser = try FFmpegDenoiser(strength: strength)
 
-                        // 初始化降噪引擎 + 执行降噪
-                        let denoiser = try AudioDenoiser(strength: strength)
-                        let processedData = try denoiser.process(audioData: audioData) { progress in
+                        // 执行 FFmpeg 降噪（文件到文件）
+                        try denoiser.process(
+                            inputURL: inputURL,
+                            outputURL: outputURL,
+                            duration: duration
+                        ) { progress in
                             DispatchQueue.main.async {
                                 self.audioFiles[fileIndex].status = .processing(progress)
                             }
                         }
 
-                        // 提取波形 + 保存临时文件
-                        let waveform = AudioFileService.extractWaveformSamples(from: processedData)
-                        let tempURL = try AudioFileService.saveToTempFile(
-                            data: processedData,
-                            originalFileName: fileName
-                        )
+                        // 从降噪后的 WAV 文件提取波形数据
+                        let waveform = try AudioFileService.loadWaveformFromFile(url: outputURL)
 
-                        continuation.resume(returning: (waveform, tempURL))
+                        continuation.resume(returning: (waveform, outputURL))
                     } catch {
                         continuation.resume(throwing: error)
                     }

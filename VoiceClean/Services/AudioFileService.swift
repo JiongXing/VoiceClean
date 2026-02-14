@@ -15,7 +15,7 @@ enum AudioFileService {
 
     // MARK: - 常量
 
-    /// DTLN 模型要求的采样率
+    /// 标准化输出采样率（与 FFmpeg 降噪输出保持一致）
     static let targetSampleRate: Double = 16000.0
 
     /// 波形可视化的采样点数量
@@ -129,6 +129,33 @@ enum AudioFileService {
         }
 
         return bufferToFloatArray(targetBuffer)
+    }
+
+    // MARK: - 便捷方法
+
+    /// 从音频文件 URL 直接加载并提取波形采样点（用于可视化）
+    /// - Parameter url: 音频文件 URL
+    /// - Returns: 降采样后的波形 RMS 采样点数组
+    static func loadWaveformFromFile(url: URL) throws -> [Float] {
+        let audioData = try loadAndResample(url: url)
+        return extractWaveformSamples(from: audioData)
+    }
+
+    /// 生成降噪输出文件的临时 URL
+    /// - Parameter originalFileName: 原始文件名
+    /// - Returns: 临时目录下的 WAV 文件 URL
+    static func generateTempOutputURL(originalFileName: String) -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let baseName = (originalFileName as NSString).deletingPathExtension
+        let outputName = "\(baseName)_denoised.wav"
+        let outputURL = tempDir.appendingPathComponent(outputName)
+
+        // 如果文件已存在则删除
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        return outputURL
     }
 
     // MARK: - 波形数据提取
