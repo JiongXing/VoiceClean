@@ -160,15 +160,6 @@ final class FFmpegDenoiser: Sendable {
             throw FFmpegDenoiserError.outputFileMissing
         }
 
-        // #region agent log
-        do {
-            let logPath2 = "/Users/Jason/Desktop/VoiceClean/.cursor/debug.log"
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int) ?? -1
-            let successLog = "{\"location\":\"FFmpegDenoiser.swift:process-success\",\"message\":\"FFmpeg completed\",\"data\":{\"exitCode\":0,\"outputExists\":true,\"outputSize\":\(fileSize)},\"hypothesisId\":\"E\",\"timestamp\":\(Int(Date().timeIntervalSince1970 * 1000))}\n"
-            if let sData = successLog.data(using: .utf8), let fh = FileHandle(forWritingAtPath: logPath2) { fh.seekToEndOfFile(); fh.write(sData); fh.closeFile() }
-        }
-        // #endregion
-
         // 最终进度 100%
         onProgress(1.0)
     }
@@ -181,15 +172,6 @@ final class FFmpegDenoiser: Sendable {
         // mix 参数: 1.0 = 完全降噪, 0.0 = 原始信号
         let mixValue = String(format: "%.2f", denoiseStrength)
         let filterChain = "arnndn=m=\(modelURL.path):mix=\(mixValue)"
-
-        // #region agent log
-        do {
-            let logPath = "/Users/Jason/Desktop/VoiceClean/.cursor/debug.log"
-            let logEntry = "{\"location\":\"FFmpegDenoiser.swift:buildArguments\",\"message\":\"FFmpeg args built\",\"data\":{\"inputPath\":\"\(inputPath)\",\"outputPath\":\"\(outputPath)\",\"filterChain\":\"\(filterChain)\",\"mixValue\":\"\(mixValue)\"},\"hypothesisId\":\"E\",\"timestamp\":\(Int(Date().timeIntervalSince1970 * 1000))}\n"
-            if !FileManager.default.fileExists(atPath: logPath) { FileManager.default.createFile(atPath: logPath, contents: nil) }
-            if let data = logEntry.data(using: .utf8), let fh = FileHandle(forWritingAtPath: logPath) { fh.seekToEndOfFile(); fh.write(data); fh.closeFile() }
-        }
-        // #endregion
 
         return [
             "-y",                       // 覆盖输出文件

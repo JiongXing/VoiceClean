@@ -32,33 +32,6 @@ xcuserdata/
 timeline.xctimeline
 playground.xcworkspace
 
-# ===== Python (scripts/) =====
-## Virtual environments
-scripts/venv/
-scripts/.venv/
-scripts/env/
-
-## Byte-compiled / optimized
-__pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-
-## Distribution / packaging
-*.egg-info/
-*.egg
-dist/
-
-## Jupyter Notebook
-.ipynb_checkpoints/
-
-# ===== CoreML / ML Model artifacts =====
-## Intermediate ONNX models (can be regenerated)
-scripts/*.onnx
-scripts/DTLN/*.onnx
-
-## TFLite intermediate files (already in pretrained_model, keep those)
-# scripts/*.tflite
 
 # ===== IDE / Editor =====
 ## Cursor / VS Code

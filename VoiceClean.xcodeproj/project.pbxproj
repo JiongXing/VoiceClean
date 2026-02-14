@@ -10,24 +10,9 @@
 		966DFB4F2F3DBC3100A90038 /* VoiceClean.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceClean.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		FDDF915E0DBB42CB9321B06A /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Models/DTLN_model_1.mlpackage,
-				Models/DTLN_model_2.mlpackage,
-				Services/AudioDenoiser.swift,
-			);
-			target = 966DFB4E2F3DBC3100A90038 /* VoiceClean */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		966DFB512F3DBC3100A90038 /* VoiceClean */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				FDDF915E0DBB42CB9321B06A /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
-			);
 			path = VoiceClean;
 			sourceTree = "<group>";
 		};
