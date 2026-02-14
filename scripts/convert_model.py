@@ -345,6 +345,7 @@ def convert_to_coreml(model_1, model_2):
             source="tensorflow",
             convert_to="mlprogram",
             inputs=m1_inputs,
+            compute_precision=ct.precision.FLOAT32,
             minimum_deployment_target=ct.target.macOS13,
         )
     except Exception as e:
@@ -385,6 +386,7 @@ def convert_to_coreml(model_1, model_2):
             source="tensorflow",
             convert_to="mlprogram",
             inputs=m2_inputs,
+            compute_precision=ct.precision.FLOAT32,
             minimum_deployment_target=ct.target.macOS13,
         )
     except Exception as e:

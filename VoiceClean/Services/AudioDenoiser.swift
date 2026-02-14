@@ -112,26 +112,32 @@ final class AudioDenoiser: Sendable {
         }
         defer { vDSP_destroy_fftsetup(fftSetup) }
 
-        // ── 汉宁窗 ──
-        var window = [Float](repeating: 0, count: blockLen)
-        vDSP_hann_window(&window, vDSP_Length(blockLen), Int32(vDSP_HANN_NORM))
+        // ── 滑动缓冲区（与官方 real_time_processing_tf_lite.py 一致） ──
+        // 输入缓冲区：初始全零，每步移入 blockShift 个新样本
+        var inBuffer = [Float](repeating: 0, count: blockLen)
+        // 输出缓冲区：用于 Overlap-Add 的滑动窗口
+        var outBuffer = [Float](repeating: 0, count: blockLen)
 
-        // ── 计算总帧数 ──
-        let numFrames = max(0, (totalSamples - blockLen) / blockShift + 1)
+        // ── 计算总帧数（与官方一致） ──
+        // 官方: num_blocks = (len(audio) - (block_len - block_shift)) // block_shift
+        let numFrames = max(0, (totalSamples - (blockLen - blockShift)) / blockShift)
 
         // ── 逐帧处理 ──
         for frameIdx in 0..<numFrames {
-            let offset = frameIdx * blockShift
-
-            // ── 提取当前帧 ──
-            var inputFrame = [Float](repeating: 0, count: blockLen)
-            let remaining = min(blockLen, totalSamples - offset)
-            for i in 0..<remaining {
-                inputFrame[i] = audioData[offset + i]
+            // ── 滑动输入缓冲区：左移 blockShift，右侧填入新样本 ──
+            // 等价于官方: in_buffer[:-block_shift] = in_buffer[block_shift:]
+            //            in_buffer[-block_shift:] = audio[idx*block_shift:(idx*block_shift)+block_shift]
+            for i in 0..<(blockLen - blockShift) {
+                inBuffer[i] = inBuffer[i + blockShift]
+            }
+            let srcOffset = frameIdx * blockShift
+            for i in 0..<blockShift {
+                let srcIdx = srcOffset + i
+                inBuffer[blockLen - blockShift + i] = srcIdx < totalSamples ? audioData[srcIdx] : 0
             }
 
-            // ── FFT → 幅度谱 + 相位谱 ──
-            let (magnitude, phase) = performFFT(inputFrame, setup: fftSetup, log2n: log2n)
+            // ── FFT → 幅度谱 + 相位谱（无加窗，与官方 np.fft.rfft 一致） ──
+            let (magnitude, phase) = performFFT(inBuffer, setup: fftSetup, log2n: log2n)
 
             // ── Model 1: 频谱掩码估计 ──
             let magInput = try createMLMultiArray(shape: [1, 1, numBins as NSNumber], from: magnitude)
@@ -160,7 +166,8 @@ final class AudioDenoiser: Sendable {
                 }
             }
 
-            // ── 应用掩码到频谱并 IFFT 回时域 ──
+            // ── 应用掩码到频谱 ──
+            // 官方: estimated_complex = in_mag * out_mask * np.exp(1j * in_phase)
             var maskedMag = [Float](repeating: 0, count: numBins)
             for i in 0..<numBins {
                 var mask = Float(truncating: maskArray[[0, 0, i as NSNumber] as [NSNumber]])
@@ -168,10 +175,10 @@ final class AudioDenoiser: Sendable {
                 maskedMag[i] = magnitude[i] * mask
             }
 
+            // ── IFFT 回时域 ──
             let estimatedFrame = performIFFT(maskedMag, phase: phase, setup: fftSetup, log2n: log2n)
 
             // ── Model 2: 特征域增强 ──
-            // Model 2 输入是 IFFT 后的时域帧
             let frameInput = try createMLMultiArray(shape: [1, 1, blockLen as NSNumber], from: estimatedFrame)
 
             var model2Dict: [String: Any] = ["frame_input": frameInput]
@@ -183,7 +190,6 @@ final class AudioDenoiser: Sendable {
             let m2Provider = try MLDictionaryFeatureProvider(dictionary: model2Dict)
             let m2Output = try model2.prediction(from: m2Provider)
 
-            // 提取增强帧 (Model 2 直接输出增强后的时域帧)
             guard let enhancedArray = m2Output.featureValue(for: m2FrameKey)?.multiArrayValue else {
                 throw DenoiserError.modelOutputMissing("enhanced frame from Model 2")
             }
@@ -198,12 +204,26 @@ final class AudioDenoiser: Sendable {
                 }
             }
 
-            // ── Overlap-Add: 将增强帧加窗并叠加到输出 ──
+            // ── Overlap-Add（与官方一致，不加窗） ──
+            // 官方: out_buffer[:-block_shift] = out_buffer[block_shift:]
+            //       out_buffer[-block_shift:] = np.zeros((block_shift))
+            //       out_buffer += np.squeeze(out_block)
+            //       out_file[idx*block_shift:(idx*block_shift)+block_shift] = out_buffer[:block_shift]
+            for i in 0..<(blockLen - blockShift) {
+                outBuffer[i] = outBuffer[i + blockShift]
+            }
+            for i in (blockLen - blockShift)..<blockLen {
+                outBuffer[i] = 0
+            }
             for i in 0..<blockLen {
-                let enhanced = Float(truncating: enhancedArray[[0, 0, i as NSNumber] as [NSNumber]])
-                let idx = offset + i
-                if idx < totalSamples {
-                    outputBuffer[idx] += enhanced * window[i]
+                outBuffer[i] += Float(truncating: enhancedArray[[0, 0, i as NSNumber] as [NSNumber]])
+            }
+            // 写入前 blockShift 个样本到输出
+            let writeOffset = frameIdx * blockShift
+            for i in 0..<blockShift {
+                let outIdx = writeOffset + i
+                if outIdx < totalSamples {
+                    outputBuffer[outIdx] = outBuffer[i]
                 }
             }
 
@@ -233,8 +253,9 @@ final class AudioDenoiser: Sendable {
 
         vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
 
-        // 缩放
-        var scale: Float = 1.0 / Float(blockLen)
+        // vDSP_fft_zrip 前向 FFT 的结果 = 2 × DFT(x)
+        // DTLN 模型期望 np.fft.rfft 等价的 |DFT(x)|，因此除以 2 即可
+        var scale: Float = 0.5
         vDSP_vsmul(realPart, 1, &scale, &realPart, 1, vDSP_Length(blockLen / 2))
         vDSP_vsmul(imagPart, 1, &scale, &imagPart, 1, vDSP_Length(blockLen / 2))
 
@@ -262,19 +283,26 @@ final class AudioDenoiser: Sendable {
     }
 
     /// 从幅度谱和相位谱执行 IFFT，返回时域帧
+    ///
+    /// 由于前向 FFT 缩放了 1/2（即 magnitude = |DFT(x)|），
+    /// 这里需要乘以 2 还原为 vDSP 期望的 2×DFT 格式。
+    /// vDSP 逆变换后再除以 2，整体 roundtrip 缩放为 1。
     private func performIFFT(_ magnitude: [Float], phase: [Float], setup: FFTSetup, log2n: vDSP_Length) -> [Float] {
         var realPart = [Float](repeating: 0, count: blockLen / 2)
         var imagPart = [Float](repeating: 0, count: blockLen / 2)
 
+        // 需要乘以 2 来匹配 vDSP_fft_zrip 的 2× 约定
+        let fftScale: Float = 2.0
+
         // DC (pack into realPart[0])
-        realPart[0] = magnitude[0] * cos(phase[0]) * Float(blockLen)
+        realPart[0] = magnitude[0] * cos(phase[0]) * fftScale
         // Nyquist (pack into imagPart[0])
-        imagPart[0] = magnitude[numBins - 1] * cos(phase[numBins - 1]) * Float(blockLen)
+        imagPart[0] = magnitude[numBins - 1] * cos(phase[numBins - 1]) * fftScale
 
         // 中间频率 bin: 从极坐标转直角坐标
         for i in 1..<(numBins - 1) {
-            realPart[i] = magnitude[i] * cos(phase[i]) * Float(blockLen)
-            imagPart[i] = magnitude[i] * sin(phase[i]) * Float(blockLen)
+            realPart[i] = magnitude[i] * cos(phase[i]) * fftScale
+            imagPart[i] = magnitude[i] * sin(phase[i]) * fftScale
         }
 
         var splitComplex = DSPSplitComplex(realp: &realPart, imagp: &imagPart)
@@ -288,7 +316,7 @@ final class AudioDenoiser: Sendable {
             }
         }
 
-        // 缩放 IFFT 结果
+        // vDSP 逆 FFT roundtrip 缩放因子为 2，除以 2 得到原始信号
         var ifftScale: Float = 1.0 / 2.0
         var scaled = [Float](repeating: 0, count: blockLen)
         vDSP_vsmul(result, 1, &ifftScale, &scaled, 1, vDSP_Length(blockLen))
